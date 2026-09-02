@@ -1,8 +1,19 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from app.repo.context import RetrievalResult
+
+
+@dataclass
+class FileEdit:
+    """
+    A deterministic edit to apply to a repository file.
+    """
+
+    file_path: str
+    old_text: str
+    new_text: str
 
 
 @dataclass
@@ -10,9 +21,6 @@ class FixPlan:
     """
     Structured plan describing what needs to change
     to resolve a coding issue.
-
-    The planner decides WHAT should change.
-    It does not modify files or execute commands.
     """
 
     summary: str
@@ -21,15 +29,15 @@ class FixPlan:
     changes: list[str]
     tests_to_run: list[str]
     rationale: str
+    edits: list[FileEdit] = field(default_factory=list)
 
 
 class Planner:
     """
-    Produces a fix plan from a GitHub issue and
-    retrieved repository context.
+    Deterministic planner that converts an issue and
+    retrieved repository context into a FixPlan.
 
-    This first version is intentionally deterministic.
-    The LLM can be plugged into this interface later.
+    The planner decides WHAT should change.
     """
 
     def plan(
@@ -40,29 +48,45 @@ class Planner:
     ) -> FixPlan:
 
         if not issue_title.strip():
-            raise ValueError("Issue title cannot be empty.")
+            raise ValueError(
+                "Issue title cannot be empty."
+            )
 
         context = context or []
 
-        target_files = self._extract_target_files(context)
+        target_files = []
+        changes = []
+        tests_to_run = []
 
-        changes = self._infer_changes(
-            issue_title=issue_title,
-            issue_body=issue_body,
-            context=context,
-        )
+        for result in context:
 
-        tests = self._infer_tests(context)
+            path = result.document.path
 
-        problem = self._build_problem(
-            issue_title=issue_title,
-            issue_body=issue_body,
-            context=context,
-        )
+            if path not in target_files:
+                target_files.append(path)
 
-        rationale = self._build_rationale(
-            context=context,
-            target_files=target_files,
+            if path.startswith("tests/"):
+                if path not in tests_to_run:
+                    tests_to_run.append(path)
+
+        problem = issue_body.strip()
+
+        if not problem:
+            problem = issue_title.strip()
+
+        if target_files:
+            changes = [
+                f"Inspect and modify {path} to address the issue."
+                for path in target_files
+            ]
+        else:
+            changes = [
+                "Identify the implementation file responsible for the issue."
+            ]
+
+        rationale = (
+            "Target files were selected from repository context "
+            "retrieved for the issue."
         )
 
         return FixPlan(
@@ -70,112 +94,6 @@ class Planner:
             problem=problem,
             target_files=target_files,
             changes=changes,
-            tests_to_run=tests,
+            tests_to_run=tests_to_run,
             rationale=rationale,
-        )
-
-    @staticmethod
-    def _extract_target_files(
-        context: list[RetrievalResult],
-    ) -> list[str]:
-
-        files: list[str] = []
-
-        for result in context:
-            if result.path not in files:
-                files.append(result.path)
-
-        return files
-
-    @staticmethod
-    def _infer_changes(
-        issue_title: str,
-        issue_body: str,
-        context: list[RetrievalResult],
-    ) -> list[str]:
-
-        if not context:
-            return [
-                "Inspect the repository to identify the implementation "
-                "responsible for the reported issue."
-            ]
-
-        changes = [
-            f"Inspect the relevant implementation in {result.path}"
-            for result in context
-        ]
-
-        if issue_body.strip():
-            changes.append(
-                "Implement the smallest change necessary to satisfy "
-                "the issue requirements."
-            )
-        else:
-            changes.append(
-                "Implement the smallest change necessary to resolve "
-                "the reported issue."
-            )
-
-        return changes
-
-    @staticmethod
-    def _infer_tests(
-        context: list[RetrievalResult],
-    ) -> list[str]:
-
-        tests: list[str] = []
-
-        for result in context:
-            path = result.path.lower()
-
-            if "test" in path:
-                if result.path not in tests:
-                    tests.append(result.path)
-
-        return tests
-
-    @staticmethod
-    def _build_problem(
-        issue_title: str,
-        issue_body: str,
-        context: list[RetrievalResult],
-    ) -> str:
-
-        if issue_body.strip():
-            return issue_body.strip()
-
-        if context:
-            return (
-                f"The repository contains relevant code for the issue "
-                f"'{issue_title.strip()}'. The implementation must be "
-                f"inspected and updated to satisfy the reported behavior."
-            )
-
-        return (
-            f"The issue '{issue_title.strip()}' requires identifying "
-            f"and fixing the responsible implementation."
-        )
-
-    @staticmethod
-    def _build_rationale(
-        context: list[RetrievalResult],
-        target_files: list[str],
-    ) -> str:
-
-        if not context:
-            return (
-                "No repository context was retrieved, so the planner "
-                "cannot confidently identify the implementation."
-            )
-
-        if len(target_files) == 1:
-            return (
-                f"Repository retrieval identified {target_files[0]} "
-                "as the relevant implementation location."
-            )
-
-        return (
-            "Repository retrieval identified multiple relevant files: "
-            + ", ".join(target_files)
-            + ". These files should be inspected before making changes."
         )
