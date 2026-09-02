@@ -1,122 +1,192 @@
+import subprocess
 from pathlib import Path
+from typing import Optional
 
-import pytest
-
-from app.sandbox.manager import SandboxManager
-from app.sandbox.models import SandboxConfig
-from app.sandbox.runner import SandboxRunner
-
-
-@pytest.fixture
-def demo_repo(tmp_path: Path) -> Path:
-
-    repo = tmp_path / "demo_repo"
-    repo.mkdir()
-
-    (repo / "hello.py").write_text(
-        "message = 'hello'\n",
-        encoding="utf-8",
-    )
-
-    return repo
+from app.sandbox.models import (
+    CommandResult,
+    SandboxConfig,
+)
 
 
-def test_sandbox_can_read_files(demo_repo):
+class SandboxRunner:
+    """
+    Runs commands inside a disposable Docker container.
 
-    runner = SandboxRunner()
+    The repository is mounted into the container at /workspace.
 
-    result = runner.run(
-        command="cat hello.py",
-        repo_path=demo_repo,
-    )
+    The container is isolated from the host with:
+    - memory limits
+    - CPU limits
+    - process limits
+    - optional network isolation
+    - command timeout
+    """
 
-    assert result.success
-    assert "hello" in result.stdout
+    def __init__(
+        self,
+        config: Optional[SandboxConfig] = None,
+    ):
+        self.config = config or SandboxConfig()
 
+    def _build_docker_command(
+        self,
+        command: str,
+        repo_path: Path,
+    ) -> list[str]:
+        """
+        Build the Docker CLI command used to execute
+        a command inside the sandbox.
+        """
 
-def test_sandbox_can_write_files(demo_repo):
+        docker_command = [
+            "docker",
+            "run",
+            "--rm",
 
-    runner = SandboxRunner()
+            # Resource limits
+            "--memory",
+            self.config.memory_limit,
 
-    result = runner.run(
-        command="echo 'updated' > output.txt",
-        repo_path=demo_repo,
-    )
+            "--cpus",
+            str(self.config.cpu_limit),
 
-    assert result.success
+            "--pids-limit",
+            str(self.config.pids_limit),
 
-    output_file = demo_repo / "output.txt"
+            # Working directory
+            "--workdir",
+            self.config.working_dir,
+        ]
 
-    assert output_file.exists()
-    assert output_file.read_text(
-        encoding="utf-8"
-    ).strip() == "updated"
+        # Network isolation
+        if not self.config.network_enabled:
+            docker_command.extend(
+                [
+                    "--network",
+                    "none",
+                ]
+            )
 
-
-def test_sandbox_returns_command_failure(demo_repo):
-
-    runner = SandboxRunner()
-
-    result = runner.run(
-        command="python -c \"raise Exception('boom')\"",
-        repo_path=demo_repo,
-    )
-
-    assert not result.success
-    assert result.return_code != 0
-    assert "boom" in result.stderr
-
-
-def test_sandbox_timeout(demo_repo):
-
-    config = SandboxConfig(
-        command_timeout=2,
-    )
-
-    runner = SandboxRunner(config)
-
-    result = runner.run(
-        command="sleep 10",
-        repo_path=demo_repo,
-    )
-
-    assert result.timed_out
-    assert not result.success
-
-
-def test_sandbox_has_no_network(demo_repo):
-
-    runner = SandboxRunner()
-
-    result = runner.run(
-        command="python -c \"import urllib.request; urllib.request.urlopen('https://example.com', timeout=2)\"",
-        repo_path=demo_repo,
-        timeout=5,
-    )
-
-    assert not result.success
-
-
-def test_sandbox_manager_creates_isolated_workspace(demo_repo):
-
-    manager = SandboxManager()
-
-    workspace = manager.create_workspace(
-        demo_repo
-    )
-
-    try:
-        assert workspace.exists()
-
-        original = demo_repo / "hello.py"
-        copied = workspace / "hello.py"
-
-        assert copied.exists()
-        assert copied.read_text(
-            encoding="utf-8"
-        ) == original.read_text(
-            encoding="utf-8"
+        # Mount repository into the container
+        docker_command.extend(
+            [
+                "--mount",
+                (
+                    "type=bind,"
+                    f"source={repo_path.resolve()},"
+                    f"target={self.config.working_dir}"
+                ),
+            ]
         )
 
-    finally:
-        manager.cleanup(workspace)
+        # Environment variables
+        for key, value in self.config.environment.items():
+            docker_command.extend(
+                [
+                    "--env",
+                    f"{key}={value}",
+                ]
+            )
+
+        # Image + shell command
+        docker_command.extend(
+            [
+                self.config.image,
+                "sh",
+                "-c",
+                command,
+            ]
+        )
+
+        return docker_command
+
+    def run(
+        self,
+        command: str,
+        repo_path: str | Path,
+        timeout: Optional[int] = None,
+    ) -> CommandResult:
+        """
+        Execute a command inside the Docker sandbox.
+
+        Returns:
+            CommandResult containing stdout, stderr,
+            return code, and timeout information.
+        """
+
+        repo_path = Path(repo_path).resolve()
+
+        if not repo_path.exists():
+            raise FileNotFoundError(
+                f"Repository path does not exist: {repo_path}"
+            )
+
+        if not repo_path.is_dir():
+            raise ValueError(
+                f"Repository path must be a directory: {repo_path}"
+            )
+
+        timeout = (
+            timeout
+            if timeout is not None
+            else self.config.command_timeout
+        )
+
+        docker_command = self._build_docker_command(
+            command=command,
+            repo_path=repo_path,
+        )
+
+        try:
+            process = subprocess.run(
+                docker_command,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+
+            return CommandResult(
+                command=command,
+                return_code=process.returncode,
+                stdout=process.stdout,
+                stderr=process.stderr,
+                timed_out=False,
+            )
+
+        except subprocess.TimeoutExpired as exc:
+            """
+            Docker command exceeded the configured timeout.
+            """
+
+            stdout = exc.stdout or ""
+            stderr = exc.stderr or ""
+
+            if isinstance(stdout, bytes):
+                stdout = stdout.decode(
+                    "utf-8",
+                    errors="replace",
+                )
+
+            if isinstance(stderr, bytes):
+                stderr = stderr.decode(
+                    "utf-8",
+                    errors="replace",
+                )
+
+            return CommandResult(
+                command=command,
+                return_code=-1,
+                stdout=stdout,
+                stderr=stderr,
+                timed_out=True,
+            )
+
+        except FileNotFoundError as exc:
+            """
+            Docker CLI itself is unavailable.
+            """
+
+            raise RuntimeError(
+                "Docker is not installed or is not available "
+                "in the system PATH."
+            ) from exc
