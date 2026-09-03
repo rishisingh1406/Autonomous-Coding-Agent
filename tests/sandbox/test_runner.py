@@ -1,192 +1,111 @@
-import subprocess
 from pathlib import Path
-from typing import Optional
 
-from app.sandbox.models import (
-    CommandResult,
-    SandboxConfig,
-)
+from app.sandbox.runner import SandboxRunner
 
 
-class SandboxRunner:
-    """
-    Runs commands inside a disposable Docker container.
+def test_runner_captures_successful_pytest_output(
+    tmp_path: Path,
+):
+    test_file = tmp_path / "test_example.py"
 
-    The repository is mounted into the container at /workspace.
-
-    The container is isolated from the host with:
-    - memory limits
-    - CPU limits
-    - process limits
-    - optional network isolation
-    - command timeout
-    """
-
-    def __init__(
-        self,
-        config: Optional[SandboxConfig] = None,
-    ):
-        self.config = config or SandboxConfig()
-
-    def _build_docker_command(
-        self,
-        command: str,
-        repo_path: Path,
-    ) -> list[str]:
+    test_file.write_text(
         """
-        Build the Docker CLI command used to execute
-        a command inside the sandbox.
+def test_add():
+    assert 2 + 3 == 5
+""".strip(),
+        encoding="utf-8",
+    )
+
+    runner = SandboxRunner()
+
+    result = runner.run(
+        repo_path=tmp_path,
+        command="pytest test_example.py -v",
+    )
+
+    assert result.success
+    assert result.return_code == 0
+    assert "1 passed" in result.stdout
+    assert result.timed_out is False
+
+
+def test_runner_captures_failed_pytest_output(
+    tmp_path: Path,
+):
+    test_file = tmp_path / "test_example.py"
+
+    test_file.write_text(
         """
+def test_add():
+    assert 2 + 3 == 10
+""".strip(),
+        encoding="utf-8",
+    )
 
-        docker_command = [
-            "docker",
-            "run",
-            "--rm",
+    runner = SandboxRunner()
 
-            # Resource limits
-            "--memory",
-            self.config.memory_limit,
+    result = runner.run(
+        repo_path=tmp_path,
+        command="pytest test_example.py -v",
+    )
 
-            "--cpus",
-            str(self.config.cpu_limit),
+    assert not result.success
+    assert result.return_code != 0
+    assert result.timed_out is False
 
-            "--pids-limit",
-            str(self.config.pids_limit),
+    failure_output = (
+        result.stdout + result.stderr
+    )
 
-            # Working directory
-            "--workdir",
-            self.config.working_dir,
-        ]
+    assert "FAILED" in failure_output
+    assert "assert 5 == 10" in failure_output
 
-        # Network isolation
-        if not self.config.network_enabled:
-            docker_command.extend(
-                [
-                    "--network",
-                    "none",
-                ]
-            )
 
-        # Mount repository into the container
-        docker_command.extend(
-            [
-                "--mount",
-                (
-                    "type=bind,"
-                    f"source={repo_path.resolve()},"
-                    f"target={self.config.working_dir}"
-                ),
-            ]
-        )
+def test_runner_captures_missing_test_error(
+    tmp_path: Path,
+):
+    runner = SandboxRunner()
 
-        # Environment variables
-        for key, value in self.config.environment.items():
-            docker_command.extend(
-                [
-                    "--env",
-                    f"{key}={value}",
-                ]
-            )
+    result = runner.run(
+        repo_path=tmp_path,
+        command="pytest test_does_not_exist.py -v",
+    )
 
-        # Image + shell command
-        docker_command.extend(
-            [
-                self.config.image,
-                "sh",
-                "-c",
-                command,
-            ]
-        )
+    assert not result.success
+    assert result.return_code != 0
 
-        return docker_command
+    error_output = (
+        result.stdout + result.stderr
+    )
 
-    def run(
-        self,
-        command: str,
-        repo_path: str | Path,
-        timeout: Optional[int] = None,
-    ) -> CommandResult:
+    assert (
+        "file or directory not found"
+        in error_output.lower()
+    )
+
+
+def test_runner_returns_structured_command_result(
+    tmp_path: Path,
+):
+    test_file = tmp_path / "test_example.py"
+
+    test_file.write_text(
         """
-        Execute a command inside the Docker sandbox.
+def test_example():
+    assert True
+""".strip(),
+        encoding="utf-8",
+    )
 
-        Returns:
-            CommandResult containing stdout, stderr,
-            return code, and timeout information.
-        """
+    runner = SandboxRunner()
 
-        repo_path = Path(repo_path).resolve()
+    result = runner.run(
+        repo_path=tmp_path,
+        command="pytest test_example.py",
+    )
 
-        if not repo_path.exists():
-            raise FileNotFoundError(
-                f"Repository path does not exist: {repo_path}"
-            )
-
-        if not repo_path.is_dir():
-            raise ValueError(
-                f"Repository path must be a directory: {repo_path}"
-            )
-
-        timeout = (
-            timeout
-            if timeout is not None
-            else self.config.command_timeout
-        )
-
-        docker_command = self._build_docker_command(
-            command=command,
-            repo_path=repo_path,
-        )
-
-        try:
-            process = subprocess.run(
-                docker_command,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-            )
-
-            return CommandResult(
-                command=command,
-                return_code=process.returncode,
-                stdout=process.stdout,
-                stderr=process.stderr,
-                timed_out=False,
-            )
-
-        except subprocess.TimeoutExpired as exc:
-            """
-            Docker command exceeded the configured timeout.
-            """
-
-            stdout = exc.stdout or ""
-            stderr = exc.stderr or ""
-
-            if isinstance(stdout, bytes):
-                stdout = stdout.decode(
-                    "utf-8",
-                    errors="replace",
-                )
-
-            if isinstance(stderr, bytes):
-                stderr = stderr.decode(
-                    "utf-8",
-                    errors="replace",
-                )
-
-            return CommandResult(
-                command=command,
-                return_code=-1,
-                stdout=stdout,
-                stderr=stderr,
-                timed_out=True,
-            )
-
-        except FileNotFoundError as exc:
-            """
-            Docker CLI itself is unavailable.
-            """
-
-            raise RuntimeError(
-                "Docker is not installed or is not available "
-                "in the system PATH."
-            ) from exc
+    assert result.command == "pytest test_example.py"
+    assert isinstance(result.return_code, int)
+    assert isinstance(result.stdout, str)
+    assert isinstance(result.stderr, str)
+    assert isinstance(result.timed_out, bool)

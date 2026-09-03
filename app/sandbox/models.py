@@ -17,8 +17,7 @@ class CommandResult:
 
 @dataclass
 class SandboxConfig:
-    image: str = "python:3.12-slim"
-
+    image: str = "autonomous-coding-agent"
     command_timeout: int = 30
 
     memory_limit: str = "512m"

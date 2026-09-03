@@ -1,10 +1,8 @@
 from pathlib import Path
+import subprocess
 from typing import Optional
 
-from app.sandbox.models import (
-    CommandResult,
-    SandboxConfig,
-)
+from app.sandbox.models import CommandResult, SandboxConfig
 
 
 class SandboxRunner:
@@ -25,7 +23,6 @@ class SandboxRunner:
         command: str,
         repo_path: Path,
     ) -> list[str]:
-
         docker_command = [
             "docker",
             "run",
@@ -34,10 +31,8 @@ class SandboxRunner:
             # Resource limits
             "--memory",
             self.config.memory_limit,
-
             "--cpus",
             str(self.config.cpu_limit),
-
             "--pids-limit",
             str(self.config.pids_limit),
 
@@ -48,34 +43,42 @@ class SandboxRunner:
 
         # Disable network by default
         if not self.config.network_enabled:
-            docker_command.extend([
-                "--network",
-                "none",
-            ])
+            docker_command.extend(
+                [
+                    "--network",
+                    "none",
+                ]
+            )
 
         # Mount repository
-        docker_command.extend([
-            "--mount",
-            (
-                f"type=bind,"
-                f"source={repo_path.resolve()},"
-                f"target={self.config.working_dir}"
-            ),
-        ])
+        docker_command.extend(
+            [
+                "--mount",
+                (
+                    "type=bind,"
+                    f"source={repo_path.resolve()},"
+                    f"target={self.config.working_dir}"
+                ),
+            ]
+        )
 
         # Environment variables
         for key, value in self.config.environment.items():
-            docker_command.extend([
-                "--env",
-                f"{key}={value}",
-            ])
+            docker_command.extend(
+                [
+                    "--env",
+                    f"{key}={value}",
+                ]
+            )
 
-        docker_command.extend([
-            self.config.image,
-            "sh",
-            "-c",
-            command,
-        ])
+        docker_command.extend(
+            [
+                self.config.image,
+                "sh",
+                "-c",
+                command,
+            ]
+        )
 
         return docker_command
 
@@ -85,7 +88,6 @@ class SandboxRunner:
         repo_path: str | Path,
         timeout: Optional[int] = None,
     ) -> CommandResult:
-
         repo_path = Path(repo_path).resolve()
 
         if not repo_path.exists():
@@ -110,7 +112,7 @@ class SandboxRunner:
         )
 
         try:
-            process = __import__("subprocess").run(
+            process = subprocess.run(
                 docker_command,
                 capture_output=True,
                 text=True,
@@ -125,8 +127,7 @@ class SandboxRunner:
                 timed_out=False,
             )
 
-        except __import__("subprocess").TimeoutExpired as exc:
-
+        except subprocess.TimeoutExpired as exc:
             stdout = exc.stdout or ""
             stderr = exc.stderr or ""
 
