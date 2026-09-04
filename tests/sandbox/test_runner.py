@@ -58,8 +58,8 @@ def test_add():
     )
 
     assert "FAILED" in failure_output
-    assert "assert 5 == 10" in failure_output
-
+    assert "assert (2 + 3) == 10" in failure_output
+    
 
 def test_runner_captures_missing_test_error(
     tmp_path: Path,

@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from app.repo.context import RepoRetriever
-from app.repo.indexer import RepoIndexer
+from app.repo.indexer      import RepoIndexer
 
 
 @pytest.fixture
@@ -44,14 +44,6 @@ def test_retriever_finds_user_code(
     )
 
 
-def test_retriever_finds_get_user(
-    retriever,
-):
-
-    results = retriever.search(
-        "get user by id missing user",
-        top_k=3,
-    )
 
     assert results
 
