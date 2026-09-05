@@ -5,6 +5,8 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from app.github.safety import GitSafetyPolicy
+
 
 @dataclass
 class GitCommandResult:
@@ -48,6 +50,10 @@ class GitClient:
     The client does not decide WHAT code should change.
     It only manages repository state after the agent
     has completed its implementation and verification.
+
+    Optional GitSafetyPolicy provides an additional security
+    boundary that restricts the agent to a specific branch
+    and remote and prevents force pushes by default.
     """
 
     DEFAULT_REMOTE = "origin"
@@ -55,6 +61,7 @@ class GitClient:
     def __init__(
         self,
         command_timeout: int = 30,
+        safety_policy: GitSafetyPolicy | None = None,
     ):
         if command_timeout < 1:
             raise ValueError(
@@ -62,6 +69,7 @@ class GitClient:
             )
 
         self.command_timeout = command_timeout
+        self.safety_policy = safety_policy
 
     def _run(
         self,
@@ -187,6 +195,11 @@ class GitClient:
 
         self._validate_branch_name(branch_name)
 
+        if self.safety_policy is not None:
+            self.safety_policy.validate_branch(
+                branch_name
+            )
+
         result = self._run(
             repo_path,
             [
@@ -223,11 +236,23 @@ class GitClient:
 
             git add -A
             git commit -m "<message>"
+
+        When a GitSafetyPolicy is configured, the actual
+        current branch is checked before any changes are staged.
         """
 
         if not message.strip():
             raise ValueError(
                 "Commit message cannot be empty."
+            )
+
+        # Validate the actual Git branch before modifying
+        # repository state.
+        if self.safety_policy is not None:
+            current_branch = self.get_current_branch()
+
+            self.safety_policy.validate_branch(
+                current_branch
             )
 
         add_result = self._run(
@@ -307,6 +332,7 @@ class GitClient:
         repo_path: str | Path,
         branch_name: str,
         remote: str = DEFAULT_REMOTE,
+        force: bool = False,
     ) -> GitOperationResult:
         """
         Push a branch to the configured Git remote.
@@ -314,6 +340,9 @@ class GitClient:
         Equivalent to:
 
             git push -u origin <branch>
+
+        Force pushing is disabled by default when a
+        GitSafetyPolicy is configured.
         """
 
         self._validate_branch_name(branch_name)
@@ -323,14 +352,35 @@ class GitClient:
                 "Remote name cannot be empty."
             )
 
+        if self.safety_policy is not None:
+            self.safety_policy.validate_branch(
+                branch_name
+            )
+
+            self.safety_policy.validate_remote(
+                remote
+            )
+
+            self.safety_policy.validate_force_push(
+                force
+            )
+
+        push_args = [
+            "push",
+            "--set-upstream",
+            remote,
+            branch_name,
+        ]
+
+        if force:
+            push_args.insert(
+                1,
+                "--force",
+            )
+
         result = self._run(
             repo_path,
-            [
-                "push",
-                "--set-upstream",
-                remote,
-                branch_name,
-            ],
+            push_args,
         )
 
         if not result.success:
@@ -379,12 +429,18 @@ class GitClient:
                 "Branch name cannot contain '..'."
             )
 
-        if branch_name.startswith("/") or branch_name.endswith("/"):
+        if (
+            branch_name.startswith("/")
+            or branch_name.endswith("/")
+        ):
             raise ValueError(
                 "Branch name cannot start or end with '/'."
             )
 
-        if re.search(r"[\x00-\x20~^:?*\\\[]", branch_name):
+        if re.search(
+            r"[\x00-\x20~^:?*\\\[]",
+            branch_name,
+        ):
             raise ValueError(
                 "Branch name contains invalid Git characters."
             )

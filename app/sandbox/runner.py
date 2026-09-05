@@ -10,6 +10,16 @@ class SandboxRunner:
     Runs commands inside a disposable Docker container.
 
     The repository is mounted into the container at /workspace.
+
+    Security guarantees:
+
+    - Network disabled by default.
+    - CPU limited.
+    - Memory limited.
+    - Process count limited.
+    - Command execution timeout.
+    - All Linux capabilities dropped.
+    - Privilege escalation disabled.
     """
 
     def __init__(
@@ -23,16 +33,26 @@ class SandboxRunner:
         command: str,
         repo_path: Path,
     ) -> list[str]:
+
         docker_command = [
             "docker",
             "run",
             "--rm",
 
+            # Security hardening
+            "--cap-drop",
+            "ALL",
+
+            "--security-opt",
+            "no-new-privileges:true",
+
             # Resource limits
             "--memory",
             self.config.memory_limit,
+
             "--cpus",
             str(self.config.cpu_limit),
+
             "--pids-limit",
             str(self.config.pids_limit),
 
@@ -41,7 +61,10 @@ class SandboxRunner:
             self.config.working_dir,
         ]
 
-        # Disable network by default
+        # Network is disabled by default.
+        #
+        # Explicitly allowing network access requires
+        # SandboxConfig(network_enabled=True).
         if not self.config.network_enabled:
             docker_command.extend(
                 [
@@ -88,6 +111,10 @@ class SandboxRunner:
         repo_path: str | Path,
         timeout: Optional[int] = None,
     ) -> CommandResult:
+        """
+        Execute an arbitrary command inside the Docker sandbox.
+        """
+
         repo_path = Path(repo_path).resolve()
 
         if not repo_path.exists():
@@ -105,6 +132,11 @@ class SandboxRunner:
             if timeout is not None
             else self.config.command_timeout
         )
+
+        if timeout <= 0:
+            raise ValueError(
+                "timeout must be greater than 0."
+            )
 
         docker_command = self._build_docker_command(
             command=command,
@@ -128,6 +160,7 @@ class SandboxRunner:
             )
 
         except subprocess.TimeoutExpired as exc:
+
             stdout = exc.stdout or ""
             stderr = exc.stderr or ""
 
@@ -156,3 +189,19 @@ class SandboxRunner:
                 "Docker is not installed or is not available "
                 "in the system PATH."
             )
+
+    def run_tests(
+        self,
+        repo_path: str | Path,
+        test_command: str = "pytest -v",
+        timeout: Optional[int] = None,
+    ) -> CommandResult:
+        """
+        Run pytest inside the Docker sandbox.
+        """
+
+        return self.run(
+            command=test_command,
+            repo_path=repo_path,
+            timeout=timeout,
+        )
