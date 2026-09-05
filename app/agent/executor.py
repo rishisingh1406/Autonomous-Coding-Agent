@@ -94,9 +94,12 @@ class Executor:
             workspace=workspace,
         )
 
-        tests_passed = all(
-            result.success
-            for result in test_results
+        tests_passed = (
+            bool(test_results)
+            and all(
+                result.success
+                for result in test_results
+            )
         )
 
         return ExecutionResult(
@@ -117,6 +120,7 @@ class Executor:
         Apply every deterministic FileEdit.
 
         Each edit:
+
         1. Resolves the target safely.
         2. Verifies the file exists.
         3. Verifies old_text exists exactly once.
@@ -137,7 +141,9 @@ class Executor:
                     EditResult(
                         file_path=edit.file_path,
                         success=False,
-                        error="Target file is outside workspace.",
+                        error=(
+                            "Target file is outside workspace."
+                        ),
                     )
                 )
                 continue
@@ -147,7 +153,9 @@ class Executor:
                     EditResult(
                         file_path=edit.file_path,
                         success=False,
-                        error="Target file does not exist.",
+                        error=(
+                            "Target file does not exist."
+                        ),
                     )
                 )
                 continue
@@ -162,7 +170,9 @@ class Executor:
                     EditResult(
                         file_path=edit.file_path,
                         success=False,
-                        error="Target file is not valid UTF-8.",
+                        error=(
+                            "Target file is not valid UTF-8."
+                        ),
                     )
                 )
                 continue
@@ -191,7 +201,8 @@ class Executor:
                         success=False,
                         error=(
                             "The expected old_text occurs "
-                            "multiple times; refusing ambiguous edit."
+                            "multiple times; refusing "
+                            "ambiguous edit."
                         ),
                     )
                 )
